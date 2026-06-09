@@ -3,7 +3,7 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxB6PUOa9WbP80I1ek75
 
 // Default workers (will be saved to localStorage)
 const DEFAULT_WORKERS = [
-  { id: 1, name: "Worker 1", code: "2222" },
+  { id: 1, name: "Hapija", code: "1111" },
   { id: 2, name: "Worker 2", code: "3333" },
   { id: 3, name: "Worker 3", code: "4444" },
   { id: 4, name: "Worker 4", code: "5555" }
