@@ -1,9 +1,9 @@
 // Google Sheets Web App URL (Replace with your deployed script URL)
-const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxB6PUOa9WbP80I1ek759EJ0jfwQxvN6xYxm05Sqt7QngnRAymfwpHDwecMnUsTuUIK/exec";
+const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxZwwaMLrVVpPpU1FLmpmdVJDtC1vnZIE_PrzMH4eNDPJGyHIzNYMthR4k6tbRpmgyz/exec";
 
 // Default workers (will be saved to localStorage)
 const DEFAULT_WORKERS = [
-  { id: 1, name: "Hapija", code: "1111" },
+  { id: 1, name: "Worker 1", code: "2222" },
   { id: 2, name: "Worker 2", code: "3333" },
   { id: 3, name: "Worker 3", code: "4444" },
   { id: 4, name: "Worker 4", code: "5555" }
@@ -47,19 +47,55 @@ const cache = {
   }
 };
 
-// Initialize workers from localStorage or defaults
-function initWorkers() {
-  let savedWorkers = cache.get('evernote_workers');
-  if (!savedWorkers || !Array.isArray(savedWorkers) || savedWorkers.length === 0) {
-    savedWorkers = [...DEFAULT_WORKERS];
-    cache.set('evernote_workers', savedWorkers);
+// Initialize workers from Google Sheets or defaults
+async function initWorkers() {
+  try {
+    const result = await callSheets('listWorkers');
+    if (result && result.ok && result.data && result.data.length > 0) {
+      state.workers = result.data;
+      // Also cache locally for faster loading
+      cache.set('evernote_workers', state.workers);
+    } else {
+      // If no workers in sheet, use defaults and save to sheet
+      let savedWorkers = cache.get('evernote_workers');
+      if (!savedWorkers || !Array.isArray(savedWorkers) || savedWorkers.length === 0) {
+        savedWorkers = [...DEFAULT_WORKERS];
+      }
+      state.workers = savedWorkers;
+      // Save default workers to sheet
+      for (const worker of state.workers) {
+        await callSheets('saveWorker', { id: 0, name: worker.name, code: worker.code });
+      }
+    }
+  } catch (e) {
+    console.error("Error loading workers:", e);
+    // Fall back to local cache
+    let savedWorkers = cache.get('evernote_workers');
+    if (!savedWorkers || !Array.isArray(savedWorkers) || savedWorkers.length === 0) {
+      savedWorkers = [...DEFAULT_WORKERS];
+      cache.set('evernote_workers', savedWorkers);
+    }
+    state.workers = savedWorkers;
   }
-  state.workers = savedWorkers;
 }
 
-// Save workers to localStorage
-function saveWorkers() {
+// Save workers to Google Sheets (and cache locally)
+async function saveWorkers() {
   cache.set('evernote_workers', state.workers);
+}
+
+// Save single worker to Google Sheets
+async function saveSingleWorker(worker) {
+  await callSheets('saveWorker', worker);
+  await saveWorkers();
+}
+
+// Delete worker from Google Sheets
+async function deleteSingleWorker(id) {
+  console.log('deleteSingleWorker called with id:', id);
+  const result = await callSheets('deleteWorker', { id: id });
+  console.log('deleteSingleWorker result:', result);
+  await saveWorkers();
 }
 
 function fmtDate(d) {
@@ -124,6 +160,22 @@ async function callSheets(action, payload = {}) {
       }
       console.log("📥 List Data:", notes);
       return { ok: true, data: notes };
+    }
+
+    // For listWorkers: parse JSON response
+    if (action === "listWorkers" && response.ok) {
+      const rawData = JSON.parse(responseText);
+      // Convert raw sheet data to our worker format
+      const workers = [];
+      for (let i = 1; i < rawData.length; i++) {
+        workers.push({
+          id: parseInt(rawData[i][0]) || i,
+          name: rawData[i][1] || "",
+          code: rawData[i][2] || ""
+        });
+      }
+      console.log("👥 Workers List Data:", workers);
+      return { ok: true, data: workers };
     }
 
     return { ok: responseText.includes("OK") };
@@ -663,109 +715,98 @@ async function deleteSelectedAdmin() {
   if (!confirm(`Are you sure you want to delete ${state.adminSelectedIds.size} selected note(s)?`)) return;
 
   const statusEl = document.getElementById("admin-status");
-  statusEl.textContent = "Getting fresh data...";
-  statusEl.style.color = "blue";
 
-  try {
-    // 1. GET FRESH DATA FROM GOOGLE SHEETS
-    const res = await fetch(SCRIPT_URL + '?action=list', { cache: 'no-cache' });
-    const rawData = await res.json();
-    
-    // Convert to our note format with row numbers
-    const allNotes = [];
-    for (let i = 1; i < rawData.length; i++) {
-      allNotes.push({
-        rowNum: i + 1,
-        sheetIndex: i,
-        Agent: rawData[i][0] || "",
-        Number: rawData[i][1] || "",
-        Date: rawData[i][2] || "",
-        Note: rawData[i][3] || ""
-      });
-    }
-    cache.set('notes_list', allNotes);
-
-    // 2. Find selected notes by their keys
-    const selectedNotes = allNotes.filter(n => state.adminSelectedIds.has(getNoteKey(n)));
-    console.log("Selected notes to delete (with fresh data):", selectedNotes);
-    statusEl.textContent = `Deleting ${selectedNotes.length} note(s)...`;
-
-    // 3. Delete one by one
-    let successCount = 0;
-    for (let i = 0; i < selectedNotes.length; i++) {
-      const targetNote = selectedNotes[i];
-      console.log(`Trying to delete note ${i+1}/${selectedNotes.length}:`, targetNote);
-      
-      // Re-get row numbers AFTER each delete, because deleting shifts row numbers!
-      const currentRes = await fetch(SCRIPT_URL + '?action=list', { cache: 'no-cache' });
-      const currentRawData = await currentRes.json();
-      
-      // Find the note in current data
-      let currentRowNum = null;
-      for (let j = 1; j < currentRawData.length; j++) {
-        if (
-          currentRawData[j][0] === targetNote.Agent &&
-          currentRawData[j][1] === targetNote.Number &&
-          currentRawData[j][2] === targetNote.Date &&
-          currentRawData[j][3] === targetNote.Note
-        ) {
-          currentRowNum = j + 1;
-          console.log(`Found note in current data at row ${currentRowNum}`);
-          break;
-        }
-      }
-      
-      if (currentRowNum) {
-        const deleteRes = await fetch(`${SCRIPT_URL}?action=delete&rowNum=${currentRowNum}`, { cache: 'no-cache' });
-        const deleteResult = await deleteRes.text();
-        console.log("Delete response for row", currentRowNum, ":", deleteResult);
-        if (deleteResult.includes('OK')) {
-          successCount++;
-        }
-      } else {
-        console.warn("Could not find note to delete in current data:", targetNote);
-      }
-    }
-
-    // 4. Final refresh
-    const finalRes = await fetch(SCRIPT_URL + '?action=list', { cache: 'no-cache' });
-    const finalRawData = await finalRes.json();
-    const finalNotes = [];
-    for (let i = 1; i < finalRawData.length; i++) {
-      finalNotes.push({
-        rowNum: i + 1,
-        sheetIndex: i,
-        Agent: finalRawData[i][0] || "",
-        Number: finalRawData[i][1] || "",
-        Date: finalRawData[i][2] || "",
-        Note: finalRawData[i][3] || ""
-      });
-    }
-    cache.set('notes_list', finalNotes);
-
-    // 5. Update UI
-    state.adminSelectedIds.clear();
-    renderAdminTodayNotes();
-    renderAllAdminNotes();
-    renderWorkerFilterList();
-    renderFilteredNotes();
-    if (state.selectedWorkerForView) {
-      renderAdminWorkerNotes(state.selectedWorkerForView.name);
-    }
-
-    if (successCount === selectedNotes.length) {
-      statusEl.textContent = "Successfully deleted!";
-      statusEl.style.color = "green";
-    } else {
-      statusEl.textContent = `Deleted ${successCount} of ${selectedNotes.length}`;
-      statusEl.style.color = "orange";
-    }
-    setTimeout(() => statusEl.textContent = "", 3000);
-
-  } catch (e) {
-    statusEl.textContent = "Error: " + e.message;
-    statusEl.style.color = "red";
+  // 1. FIRST DELETE FROM LOCAL CACHE INSTANTLY!
+  const currentNotes = cache.get('notes_list') || [];
+  const filteredNotes = currentNotes.filter(n => !state.adminSelectedIds.has(getNoteKey(n)));
+  cache.set('notes_list', filteredNotes);
+  // Update UI immediately!
+  state.adminSelectedIds.clear();
+  renderAdminTodayNotes();
+  renderAllAdminNotes();
+  renderWorkerFilterList();
+  renderFilteredNotes();
+  if (state.selectedWorkerForView) {
+    renderAdminWorkerNotes(state.selectedWorkerForView.name);
   }
+  statusEl.textContent = "Deleting...";
+  statusEl.style.color = "blue";
+  const deleteKeys = new Set(state.adminSelectedIds);
+
+  // 2. NOW SYNC WITH GOOGLE SHEETS IN BACKGROUND!
+  (async () => {
+    try {
+      const res = await fetch(SCRIPT_URL + '?action=list', { cache: 'no-cache' });
+      const rawData = await res.json();
+      const allNotes = [];
+      for (let i = 1; i < rawData.length; i++) {
+        allNotes.push({
+          rowNum: i + 1,
+          sheetIndex: i,
+          Agent: rawData[i][0] || "",
+          Number: rawData[i][1] || "",
+          Date: rawData[i][2] || "",
+          Note: rawData[i][3] || ""
+        });
+      }
+      const selectedNotes = allNotes.filter(n => deleteKeys.has(getNoteKey(n)));
+      let successCount = 0;
+      for (let i = 0; i < selectedNotes.length; i++) {
+        const targetNote = selectedNotes[i];
+        const currentRes = await fetch(SCRIPT_URL + '?action=list', { cache: 'no-cache' });
+        const currentRawData = await currentRes.json();
+        let currentRowNum = null;
+        for (let j = 1; j < currentRawData.length; j++) {
+          if (
+            currentRawData[j][0] === targetNote.Agent &&
+            currentRawData[j][1] === targetNote.Number &&
+            currentRawData[j][2] === targetNote.Date &&
+            currentRawData[j][3] === targetNote.Note
+          ) {
+            currentRowNum = j + 1;
+            break;
+          }
+        }
+        if (currentRowNum) {
+          const deleteRes = await fetch(`${SCRIPT_URL}?action=delete&rowNum=${currentRowNum}`, { cache: 'no-cache' });
+          const deleteResult = await deleteRes.text();
+          if (deleteResult.includes('OK')) successCount++;
+        }
+      }
+      const finalRes = await fetch(SCRIPT_URL + '?action=list', { cache: 'no-cache' });
+      const finalRawData = await finalRes.json();
+      const finalNotes = [];
+      for (let i = 1; i < finalRawData.length; i++) {
+        finalNotes.push({
+          rowNum: i + 1,
+          sheetIndex: i,
+          Agent: finalRawData[i][0] || "",
+          Number: finalRawData[i][1] || "",
+          Date: finalRawData[i][2] || "",
+          Note: finalRawData[i][3] || ""
+        });
+      }
+      cache.set('notes_list', finalNotes);
+      // Re-render UI with final data
+      renderAdminTodayNotes();
+      renderAllAdminNotes();
+      renderWorkerFilterList();
+      renderFilteredNotes();
+      if (state.selectedWorkerForView) {
+        renderAdminWorkerNotes(state.selectedWorkerForView.name);
+      }
+      if (successCount === selectedNotes.length) {
+        statusEl.textContent = "Successfully deleted!";
+        statusEl.style.color = "green";
+      }
+      setTimeout(() => statusEl.textContent = "", 3000);
+    } catch (e) {
+      console.error("Background delete failed:", e);
+      statusEl.textContent = "Deleted locally, sync failed!";
+      statusEl.style.color = "orange";
+      setTimeout(() => statusEl.textContent = "", 3000);
+    }
+  })();
 }
 
 // Save login data to localStorage
@@ -795,18 +836,60 @@ async function handleAccessCode() {
     statusEl.textContent = 'Access granted! Welcome Admin';
     statusEl.style.color = 'var(--success)';
     setTimeout(() => showAdminDashboard(), 500);
+    
+    // Sync workers in background
+    (async () => {
+      try {
+        const result = await callSheets('listWorkers');
+        if (result && result.ok && result.data) {
+          state.workers = result.data;
+          cache.set('evernote_workers', state.workers);
+        }
+      } catch (e) { console.error(e); }
+    })();
     return;
   }
 
-  // Check for worker
-  const worker = state.workers.find(w => w.code === code);
-  if (worker) {
-    state.currentUser = { ...worker, role: 'worker' };
+  // FIRST CHECK LOCAL CACHE FOR INSTANT LOGIN!
+  console.log('� Checking local workers for code:', code);
+  const localWorker = state.workers.find(w => String(w.code) === String(code));
+  
+  if (localWorker) {
+    state.currentUser = { ...localWorker, role: 'worker' };
     saveLoginData(state.currentUser);
-    statusEl.textContent = `Access granted! Welcome ${worker.name}`;
+    statusEl.textContent = `Access granted! Welcome ${localWorker.name}`;
     statusEl.style.color = 'var(--success)';
     setTimeout(() => showWorkerDashboard(), 500);
+    
+    // Sync workers in background
+    (async () => {
+      try {
+        const result = await callSheets('listWorkers');
+        if (result && result.ok && result.data) {
+          state.workers = result.data;
+          cache.set('evernote_workers', state.workers);
+        }
+      } catch (e) { console.error(e); }
+    })();
     return;
+  }
+
+  // If no local match, check Google Sheets
+  statusEl.textContent = 'Checking code...';
+  const result = await callSheets('listWorkers');
+  if (result && result.ok && result.data) {
+    state.workers = result.data;
+    cache.set('evernote_workers', state.workers);
+    
+    const sheetWorker = state.workers.find(w => String(w.code) === String(code));
+    if (sheetWorker) {
+      state.currentUser = { ...sheetWorker, role: 'worker' };
+      saveLoginData(state.currentUser);
+      statusEl.textContent = `Access granted! Welcome ${sheetWorker.name}`;
+      statusEl.style.color = 'var(--success)';
+      setTimeout(() => showWorkerDashboard(), 500);
+      return;
+    }
   }
 
   // Invalid code
@@ -930,101 +1013,87 @@ async function deleteSelected() {
   if (!confirm(`Are you sure you want to delete ${state.selectedIds.size} selected note(s)?`)) return;
 
   const status = document.getElementById("status");
-  status.textContent = "Getting fresh data...";
+
+  // 1. FIRST DELETE FROM LOCAL CACHE INSTANTLY!
+  const currentNotes = cache.get('notes_list') || [];
+  const filteredNotes = currentNotes.filter(n => !state.selectedIds.has(getNoteKey(n)));
+  cache.set('notes_list', filteredNotes);
+  await refresh(true); // Update UI immediately!
+  status.textContent = "Deleting...";
   status.style.color = "blue";
+  const deleteKeys = new Set(state.selectedIds);
+  state.selectedIds.clear();
 
-  try {
-    // 1. GET FRESH DATA FROM GOOGLE SHEETS
-    const response = await fetch(SCRIPT_URL + '?action=list', { cache: 'no-cache' });
-    const rawData = await response.json();
-    
-    // Convert to our note format
-    const allNotes = [];
-    for (let i = 1; i < rawData.length; i++) {
-      allNotes.push({
-        rowNum: i + 1,
-        sheetIndex: i,
-        Agent: rawData[i][0] || "",
-        Number: rawData[i][1] || "",
-        Date: rawData[i][2] || "",
-        Note: rawData[i][3] || ""
-      });
-    }
-    cache.set('notes_list', allNotes);
-
-    // 2. Find selected notes by their keys
-    const selectedNotes = allNotes.filter(n => state.selectedIds.has(getNoteKey(n)));
-    console.log("Selected notes to delete (worker):", selectedNotes);
-    status.textContent = `Deleting ${selectedNotes.length} note(s)...`;
-
-    // 3. Delete one by one (re-get row numbers after each delete!)
-    let successCount = 0;
-    for (let i = 0; i < selectedNotes.length; i++) {
-      const targetNote = selectedNotes[i];
-      console.log(`Worker deleting note ${i+1}/${selectedNotes.length}:`, targetNote);
-      // Re-get data after each delete to get accurate row numbers!
-      const currentRes = await fetch(SCRIPT_URL + '?action=list', { cache: 'no-cache' });
-      const currentRawData = await currentRes.json();
+  // 2. NOW SYNC WITH GOOGLE SHEETS IN BACKGROUND!
+  (async () => {
+    try {
+      const response = await fetch(SCRIPT_URL + '?action=list', { cache: 'no-cache' });
+      const rawData = await response.json();
       
-      // Find note in current data
-      let currentRowNum = null;
-      for (let j = 1; j < currentRawData.length; j++) {
-        if (
-          currentRawData[j][0] === targetNote.Agent &&
-          currentRawData[j][1] === targetNote.Number &&
-          currentRawData[j][2] === targetNote.Date &&
-          currentRawData[j][3] === targetNote.Note
-        ) {
-          currentRowNum = j + 1;
-          console.log(`Worker found note at row ${currentRowNum}`);
-          break;
+      const allNotes = [];
+      for (let i = 1; i < rawData.length; i++) {
+        allNotes.push({
+          rowNum: i + 1,
+          sheetIndex: i,
+          Agent: rawData[i][0] || "",
+          Number: rawData[i][1] || "",
+          Date: rawData[i][2] || "",
+          Note: rawData[i][3] || ""
+        });
+      }
+
+      const selectedNotes = allNotes.filter(n => deleteKeys.has(getNoteKey(n)));
+      let successCount = 0;
+      for (let i = 0; i < selectedNotes.length; i++) {
+        const targetNote = selectedNotes[i];
+        const currentRes = await fetch(SCRIPT_URL + '?action=list', { cache: 'no-cache' });
+        const currentRawData = await currentRes.json();
+        let currentRowNum = null;
+        for (let j = 1; j < currentRawData.length; j++) {
+          if (
+            currentRawData[j][0] === targetNote.Agent &&
+            currentRawData[j][1] === targetNote.Number &&
+            currentRawData[j][2] === targetNote.Date &&
+            currentRawData[j][3] === targetNote.Note
+          ) {
+            currentRowNum = j + 1;
+            break;
+          }
+        }
+        if (currentRowNum) {
+          const deleteRes = await fetch(`${SCRIPT_URL}?action=delete&rowNum=${currentRowNum}`, { cache: 'no-cache' });
+          const deleteResult = await deleteRes.text();
+          if (deleteResult.includes('OK')) successCount++;
         }
       }
-      
-      if (currentRowNum) {
-        const deleteRes = await fetch(`${SCRIPT_URL}?action=delete&rowNum=${currentRowNum}`, { cache: 'no-cache' });
-        const deleteResult = await deleteRes.text();
-        console.log("Worker delete response:", deleteResult);
-        if (deleteResult.includes('OK')) {
-          successCount++;
-        }
+
+      const finalRes = await fetch(SCRIPT_URL + '?action=list', { cache: 'no-cache' });
+      const finalRawData = await finalRes.json();
+      const finalNotes = [];
+      for (let i = 1; i < finalRawData.length; i++) {
+        finalNotes.push({
+          rowNum: i + 1,
+          sheetIndex: i,
+          Agent: finalRawData[i][0] || "",
+          Number: finalRawData[i][1] || "",
+          Date: finalRawData[i][2] || "",
+          Note: finalRawData[i][3] || ""
+        });
       }
-    }
-
-    // 4. Final refresh
-    const finalRes = await fetch(SCRIPT_URL + '?action=list', { cache: 'no-cache' });
-    const finalRawData = await finalRes.json();
-    const finalNotes = [];
-    for (let i = 1; i < finalRawData.length; i++) {
-      finalNotes.push({
-        rowNum: i + 1,
-        sheetIndex: i,
-        Agent: finalRawData[i][0] || "",
-        Number: finalRawData[i][1] || "",
-        Date: finalRawData[i][2] || "",
-        Note: finalRawData[i][3] || ""
-      });
-    }
-    cache.set('notes_list', finalNotes);
-
-    // 5. Update UI
-    state.selectedIds.clear();
-    await refresh(true);
-
-    if (successCount === selectedNotes.length) {
-      status.textContent = "Successfully deleted!";
-      status.style.color = "green";
-      setTimeout(() => { if(status.textContent.includes("Deleted")) status.textContent = ""; }, 3000);
-    } else {
-      status.textContent = `Deleted ${successCount} of ${selectedNotes.length}`;
+      cache.set('notes_list', finalNotes);
+      await refresh(false);
+      if (successCount === selectedNotes.length) {
+        status.textContent = "Successfully deleted!";
+        status.style.color = "green";
+        setTimeout(() => { if(status.textContent.includes("Successfully")) status.textContent = ""; }, 3000);
+      }
+    } catch (e) {
+      console.error("Background delete failed:", e);
+      status.textContent = "Deleted locally, sync failed!";
       status.style.color = "orange";
+      setTimeout(() => status.textContent = "", 3000);
     }
-
-  } catch (e) {
-    console.error("Delete failed:", e);
-    status.textContent = "Error: " + e.message;
-    status.style.color = "red";
-  }
+  })();
 }
 
 function toggleSelect(noteKey) {
@@ -1293,6 +1362,12 @@ function setTab(name) {
   document.getElementById("today-view").classList.toggle("hidden", name !== "today");
   document.getElementById("all-view").classList.toggle("hidden", name !== "all");
 
+  // Show/hide the worker form only when on Today tab
+  const formSection = document.getElementById("worker-form-section");
+  if (formSection) {
+    formSection.classList.toggle("hidden", name !== "today");
+  }
+
   refresh(true);
 }
 
@@ -1501,7 +1576,7 @@ function backToWorkerList() {
   document.getElementById('worker-list').classList.remove('hidden');
 }
 
-function addWorker() {
+async function addWorker() {
   const nameInput = document.getElementById('new-worker-name');
   const codeInput = document.getElementById('new-worker-code');
   const name = nameInput.value.trim();
@@ -1519,18 +1594,29 @@ function addWorker() {
   }
   
   const newWorker = {
-    id: Date.now(),
+    id: 0, // Let Google Apps Script handle ID
     name,
     code
   };
   
-  state.workers.push(newWorker);
-  saveWorkers();
+  // Save to Google Sheets first
+  await saveSingleWorker(newWorker);
+  
+  // Refresh workers from Google Sheets
+  const result = await callSheets('listWorkers');
+  if (result && result.ok && result.data) {
+    state.workers = result.data;
+    cache.set('evernote_workers', state.workers);
+  }
+  
   renderWorkerList();
   
   // Also update worker filter list if we're on worker-notes section
   if (state.adminActiveSection === 'worker-notes') {
-    state.selectedWorkersForFilter.add(newWorker.id);
+    const lastWorker = state.workers[state.workers.length - 1];
+    if (lastWorker) {
+      state.selectedWorkersForFilter.add(lastWorker.id);
+    }
     renderWorkerFilterList();
     renderFilteredNotes();
   }
@@ -1540,17 +1626,29 @@ function addWorker() {
   codeInput.value = '';
 }
 
-function deleteWorker(workerId) {
+async function deleteWorker(workerId) {
+  console.log('deleteWorker called with workerId:', workerId);
   const worker = state.workers.find(w => w.id === workerId);
+  console.log('Found worker to delete:', worker);
   if (!worker) return;
 
   if (!confirm(`Are you sure you want to delete ${worker.name}?`)) return;
 
-  state.workers = state.workers.filter(w => w.id !== workerId);
+  // Delete from Google Sheets first
+  console.log('Calling deleteSingleWorker with id:', workerId);
+  await deleteSingleWorker(workerId);
+
+  // Refresh workers from Google Sheets
+  const result = await callSheets('listWorkers');
+  console.log('listWorkers result:', result);
+  if (result && result.ok && result.data) {
+    state.workers = result.data;
+    cache.set('evernote_workers', state.workers);
+  }
+
   // Remove from filter selection too
   state.selectedWorkersForFilter.delete(workerId);
   
-  saveWorkers();
   renderWorkerList();
   
   // Also update worker filter list if we're on worker-notes section
@@ -1572,7 +1670,7 @@ function editWorker(workerId) {
   document.body.style.overflow = 'hidden';
 }
 
-function saveWorkerChanges() {
+async function saveWorkerChanges() {
   if (!state.editingWorkerId) return;
 
   const name = document.getElementById('edit-worker-name').value.trim();
@@ -1596,9 +1694,20 @@ function saveWorkerChanges() {
     // If name changed, we need to update note agent names in notes too!
     const oldName = state.workers[workerIndex].name;
     
-    state.workers[workerIndex].name = name;
-    state.workers[workerIndex].code = code;
-    saveWorkers();
+    // Save to Google Sheets first
+    await saveSingleWorker({
+      id: state.editingWorkerId,
+      name: name,
+      code: code
+    });
+    
+    // Refresh workers from Google Sheets
+    const result = await callSheets('listWorkers');
+    if (result && result.ok && result.data) {
+      state.workers = result.data;
+      cache.set('evernote_workers', state.workers);
+    }
+    
     renderWorkerList();
     
     // Also update worker filter list if we're on worker-notes section
@@ -1627,17 +1736,6 @@ function closeEditWorkerModal() {
   document.body.style.overflow = 'auto';
 }
 
-function deleteWorker(workerId) {
-  const worker = state.workers.find(w => w.id === workerId);
-  if (!worker) return;
-
-  if (!confirm(`Are you sure you want to delete ${worker.name}?`)) return;
-
-  state.workers = state.workers.filter(w => w.id !== workerId);
-  saveWorkers();
-  renderWorkerList();
-}
-
 // Check saved login and return user if valid (within 6 hours)
 function checkSavedLogin() {
   const loginStr = localStorage.getItem('evernote_login');
@@ -1663,9 +1761,9 @@ function checkSavedLogin() {
 
 // --- Initialization ---
 
-function init() {
+async function init() {
   // Initialize workers
-  initWorkers();
+  await initWorkers();
 
   // Access screen event listeners
   document.getElementById('enter-btn').addEventListener('click', handleAccessCode);
