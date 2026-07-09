@@ -1,11 +1,11 @@
 {
-  "name": "Student Notes",
-  "short_name": "Notes",
-  "description": "Simple student note taking app",
+  "name": "EverNote",
+  "short_name": "EverNote",
+  "description": "Simple note taking app",
   "start_url": "./index.html",
   "display": "standalone",
-  "background_color": "#ffffff",
-  "theme_color": "#ffffff",
+  "background_color": "#09090b",
+  "theme_color": "#09090b",
   "icons": [
     {
       "src": "logo192.png",
